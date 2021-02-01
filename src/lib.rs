@@ -119,7 +119,7 @@ impl<T> TokenSender<T> for StreamedTokenSender<T> {
     }
 }
 
-/// Will return that a `TokenSender` and `TokenReader` for use when lexing and parsing in separate threads
+/// Will return a `TokenSender` and `TokenReader` for use when lexing and parsing in separate threads
 /// Unlike `StaticTokenChannel` it does not buffer all the tokens before parsing can begin
 pub fn get_streamed_token_channel<T>() -> (StreamedTokenSender<T>, StreamedTokenReader<T>) {
     let (sender, receiver) = sync_channel::<Token<T>>(20);
@@ -172,6 +172,29 @@ mod tests {
     }
 
     #[test]
+    fn static_token_channel_peek() {
+        let mut stc = StaticTokenChannel::new();
+        stc.push(Token(12, Span(0, 2)));
+
+        assert_eq!(stc.peek().unwrap(), &Token(12, Span(0, 2)));
+        assert_eq!(stc.next().unwrap(), Token(12, Span(0, 2)));
+        assert_eq!(stc.next(), None);
+    }
+
+    #[test]
+    fn static_token_channel_expect_next() {
+        let mut stc = StaticTokenChannel::new();
+        stc.push(Token(12, Span(0, 2)));
+        stc.push(Token(24, Span(2, 4)));
+
+        assert_eq!(stc.expect_next(12).unwrap(), Span(0, 2));
+        let err = stc.expect_next(10).unwrap_err();
+        assert_eq!(err.position, Some(Span(2, 4)));
+        assert_eq!(err.reason, "Expected 10, received 24".to_owned());
+        assert_eq!(stc.next(), None);
+    }
+
+    #[test]
     fn streamed_token_channel() {
         let (mut sender, mut reader) = get_streamed_token_channel();
         std::thread::spawn(move || {
@@ -183,6 +206,33 @@ mod tests {
         assert_eq!(reader.next().unwrap(), Token(12, Span(0, 2)));
         assert_eq!(reader.next().unwrap(), Token(32, Span(2, 4)));
         assert_eq!(reader.next().unwrap(), Token(52, Span(4, 8)));
+        assert_eq!(reader.next(), None);
+    }
+
+    #[test]
+    fn streamed_token_channel_peek() {
+        let (mut sender, mut reader) = get_streamed_token_channel();
+        std::thread::spawn(move || {
+            sender.push(Token(12, Span(0, 2)));
+        });
+
+        assert_eq!(reader.peek().unwrap(), &Token(12, Span(0, 2)));
+        assert_eq!(reader.next().unwrap(), Token(12, Span(0, 2)));
+        assert_eq!(reader.next(), None);
+    }
+
+    #[test]
+    fn streamed_token_channel_expect_next() {
+        let (mut sender, mut reader) = get_streamed_token_channel();
+        std::thread::spawn(move || {
+            sender.push(Token(12, Span(0, 2)));
+            sender.push(Token(24, Span(2, 4)));
+        });
+
+        assert_eq!(reader.expect_next(12).unwrap(), Span(0, 2));
+        let err = reader.expect_next(10).unwrap_err();
+        assert_eq!(err.position, Some(Span(2, 4)));
+        assert_eq!(err.reason, "Expected 10, received 24".to_owned());
         assert_eq!(reader.next(), None);
     }
 }
