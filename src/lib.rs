@@ -1,5 +1,6 @@
 use std::{
     collections::VecDeque,
+    cell::UnsafeCell,
     fmt,
     sync::mpsc::{sync_channel, Receiver, RecvError, SyncSender},
 };
@@ -45,9 +46,16 @@ where
     T: PartialEq + fmt::Debug,
 {
     /// Returns reference to next token but does not advance iterator forward
-    fn peek(&mut self) -> Option<&Token<T>>;
+    fn peek(&self) -> Option<&Token<T>>;
     /// Returns token and advances forward
     fn next(&mut self) -> Option<Token<T>>;
+
+    /// Runs the callback over the upcoming tokens. Passes the value behind the Token to the closure.
+    /// Will stop and return the reference to the Token when the closure returns true.
+    /// Does not advance the reader.
+    ///
+    /// Used for lookahead and then doing branching based on return value during parsing
+    fn scan(&self, f: impl FnMut(&T) -> bool) -> Option<&Token<T>>;
 
     /// Tests that next token matches an expected type. Will return `ParseError` if does not
     /// match. Else it will return the position of the correctly matching token
@@ -98,19 +106,28 @@ impl<T> TokenSender<T> for StaticTokenChannel<T> {
 }
 
 impl<T: PartialEq + fmt::Debug> TokenReader<T> for StaticTokenChannel<T> {
-    fn peek(&mut self) -> Option<&Token<T>> {
+    fn peek(&self) -> Option<&Token<T>> {
         self.tokens.front()
     }
 
     fn next(&mut self) -> Option<Token<T>> {
         self.tokens.pop_front()
     }
+
+    fn scan(&self, mut cb: impl FnMut(&T) -> bool) -> Option<&Token<T>> {
+        for token in self.tokens.iter() {
+            if cb(&token.0) {
+                return Some(&token);
+            }
+        }
+        None
+    }
 }
 
 pub struct StreamedTokenSender<T>(SyncSender<Token<T>>);
 pub struct StreamedTokenReader<T> {
     receiver: Receiver<Token<T>>,
-    cache: VecDeque<Token<T>>,
+    cache: UnsafeCell<VecDeque<Token<T>>>,
 }
 
 impl<T> TokenSender<T> for StreamedTokenSender<T> {
@@ -127,30 +144,61 @@ pub fn get_streamed_token_channel<T>() -> (StreamedTokenSender<T>, StreamedToken
         StreamedTokenSender(sender),
         StreamedTokenReader {
             receiver,
-            cache: VecDeque::new(),
+            cache: UnsafeCell::new(VecDeque::new()),
         },
     )
 }
 
 impl<T: PartialEq + fmt::Debug> TokenReader<T> for StreamedTokenReader<T> {
-    fn peek(&mut self) -> Option<&Token<T>> {
-        if self.cache.is_empty() {
+    fn peek(&self) -> Option<&Token<T>> {
+        // SAFETY: mutable reference needed to added to cache. RefCell returns Ref<T> not &T.
+        // no methods on StreamedTokenReader return &mut to values in the cache
+        let cache = unsafe { &mut *self.cache.get() };
+        if cache.is_empty() {
             match self.receiver.recv() {
-                Ok(val) => self.cache.push_back(val),
+                Ok(val) => cache.push_back(val),
                 // Err is reader has dropped e.g. no more tokens
                 Err(RecvError) => {
                     return None;
                 }
             }
         }
-        self.cache.front()
+        cache.front()
     }
 
     fn next(&mut self) -> Option<Token<T>> {
-        if !self.cache.is_empty() {
-            return self.cache.pop_front();
+        // SAFETY: safe to get mutable reference for this function as have mutable self
+        let cache = unsafe { &mut *self.cache.get() };
+        if !cache.is_empty() {
+            return cache.pop_front();
         }
         self.receiver.recv().ok()
+    }
+
+    fn scan(&self, mut cb: impl FnMut(&T) -> bool) -> Option<&Token<T>> {
+        for token in unsafe { &*self.cache.get() }.iter() {
+            if cb(&token.0) {
+                return Some(token);
+            }
+        }
+        // SAFETY: mutable reference needed to added to cache. RefCell returns Ref<T> not &T.
+        // no methods on StreamedTokenReader return &mut to values in the cache
+        let cache = unsafe { &mut *self.cache.get() };
+        loop {
+            match self.receiver.recv() {
+                Ok(val) => {
+                    if cb(&val.0) {
+                        cache.push_back(val);
+                        return cache.back();
+                    }
+                    cache.push_back(val);
+                }
+                // Err is reader has dropped e.g. no more tokens
+                Err(RecvError) => {
+                    return None;
+                }
+            }
+        }
     }
 }
 
@@ -195,6 +243,22 @@ mod tests {
     }
 
     #[test]
+    fn static_token_channel_scan() {
+        let mut stc = StaticTokenChannel::new();
+        for val in vec![4, 10, 100, 200] {
+            stc.push(Token(val, Span(0, 0)));
+        }
+
+        let mut count = 0;
+        let x = stc.scan(move |token_val| {
+            count += token_val;
+            count > 100
+        });
+        assert_eq!(x.unwrap().0, 100);
+        assert_eq!(stc.next().unwrap().0, 4);
+    }
+
+    #[test]
     fn streamed_token_channel() {
         let (mut sender, mut reader) = get_streamed_token_channel();
         std::thread::spawn(move || {
@@ -234,5 +298,23 @@ mod tests {
         assert_eq!(err.position, Some(Span(2, 4)));
         assert_eq!(err.reason, "Expected 10, received 24".to_owned());
         assert_eq!(reader.next(), None);
+    }
+
+    #[test]
+    fn streamed_token_channel_scan() {
+        let (mut sender, mut reader) = get_streamed_token_channel();
+        std::thread::spawn(move || {
+            for val in vec![4, 10, 100, 200] {
+                sender.push(Token(val, Span(0, 0)));
+            }
+        });
+            
+        let mut count = 0;
+        let x = reader.scan(move |token_val| {
+            count += token_val;
+            count > 100
+        });
+        assert_eq!(x.unwrap().0, 100);
+        assert_eq!(reader.next().unwrap().0, 4);
     }
 }

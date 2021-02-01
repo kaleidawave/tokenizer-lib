@@ -6,7 +6,7 @@ Tokenization utilities for building parsers in Rust
 
 Static token channel:
 
-```rs
+```rust
 let mut stc = StaticTokenChannel::new();
 stc.push(Token(12, Span(0, 2)));
 stc.push(Token(32, Span(2, 4)));
@@ -19,7 +19,7 @@ assert_eq!(stc.next(), None);
 
 Streamed token channel:
 
-```rs
+```rust
 let (mut sender, mut reader) = get_streamed_token_channel();
 std::thread::spawn(move || {
     sender.push(Token(12, Span(0, 2)));
