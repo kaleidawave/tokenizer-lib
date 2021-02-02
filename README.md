@@ -1,5 +1,8 @@
 # Tokenizer-lib
 
+[![Docs](https://docs.rs/tokenizer-lib/badge.svg)](https://docs.rs/tokenizer-lib/)
+[![Crates](https://img.shields.io/crates/v/tokenizer-lib.svg)](https://crates.io/crates/tokenizer-lib)
+
 Tokenization utilities for building parsers in Rust
 
 ### Examples
@@ -32,3 +35,5 @@ assert_eq!(reader.next().unwrap(), Token(32, Span(2, 4)));
 assert_eq!(reader.next().unwrap(), Token(52, Span(4, 8)));
 assert_eq!(reader.next(), None);
 ```
+
+Provides utilities such as `peek` and `scan` for lookahead. Also `expect_next` for expecting a token value.
