@@ -51,7 +51,7 @@ where
     fn next(&mut self) -> Option<Token<T>>;
 
     /// Runs the callback over the upcoming tokens. Passes the value behind the Token to the closure.
-    /// Will stop and return the reference to the Token when the closure returns true.
+    /// Will stop and return a reference to the next Token from when the closure returns true.
     /// Does not advance the reader.
     ///
     /// Used for lookahead and then doing branching based on return value during parsing
@@ -115,9 +115,10 @@ impl<T: PartialEq + fmt::Debug> TokenReader<T> for StaticTokenChannel<T> {
     }
 
     fn scan(&self, mut cb: impl FnMut(&T) -> bool) -> Option<&Token<T>> {
-        for token in self.tokens.iter() {
+        let mut iter = self.tokens.iter().peekable();
+        while let Some(token) = iter.next() {
             if cb(&token.0) {
-                return Some(&token);
+                return iter.peek().map(|v| *v);
             }
         }
         None
@@ -184,12 +185,16 @@ impl<T: PartialEq + fmt::Debug> TokenReader<T> for StreamedTokenReader<T> {
         // SAFETY: mutable reference needed to added to cache. RefCell returns Ref<T> not &T.
         // no methods on StreamedTokenReader return &mut to values in the cache
         let cache = unsafe { &mut *self.cache.get() };
+        let mut found = false;
         loop {
             match self.receiver.recv() {
                 Ok(val) => {
-                    if cb(&val.0) {
+                    if found {
                         cache.push_back(val);
                         return cache.back();
+                    }
+                    if cb(&val.0) {
+                        found = true;
                     }
                     cache.push_back(val);
                 }
@@ -216,7 +221,7 @@ mod tests {
         assert_eq!(stc.next().unwrap(), Token(12, Span(0, 2)));
         assert_eq!(stc.next().unwrap(), Token(32, Span(2, 4)));
         assert_eq!(stc.next().unwrap(), Token(52, Span(4, 8)));
-        assert_eq!(stc.next(), None);
+        assert!(stc.next().is_none());
     }
 
     #[test]
@@ -226,7 +231,7 @@ mod tests {
 
         assert_eq!(stc.peek().unwrap(), &Token(12, Span(0, 2)));
         assert_eq!(stc.next().unwrap(), Token(12, Span(0, 2)));
-        assert_eq!(stc.next(), None);
+        assert!(stc.next().is_none());
     }
 
     #[test]
@@ -239,7 +244,7 @@ mod tests {
         let err = stc.expect_next(10).unwrap_err();
         assert_eq!(err.position, Some(Span(2, 4)));
         assert_eq!(err.reason, "Expected 10, received 24".to_owned());
-        assert_eq!(stc.next(), None);
+        assert!(stc.next().is_none());
     }
 
     #[test]
@@ -254,8 +259,12 @@ mod tests {
             count += token_val;
             count > 100
         });
-        assert_eq!(x.unwrap().0, 100);
+        assert_eq!(x.unwrap().0, 200);
         assert_eq!(stc.next().unwrap().0, 4);
+        assert_eq!(stc.next().unwrap().0, 10);
+        assert_eq!(stc.next().unwrap().0, 100);
+        assert_eq!(stc.next().unwrap().0, 200);
+        assert!(stc.next().is_none());
     }
 
     #[test]
@@ -270,7 +279,7 @@ mod tests {
         assert_eq!(reader.next().unwrap(), Token(12, Span(0, 2)));
         assert_eq!(reader.next().unwrap(), Token(32, Span(2, 4)));
         assert_eq!(reader.next().unwrap(), Token(52, Span(4, 8)));
-        assert_eq!(reader.next(), None);
+        assert!(reader.next().is_none());
     }
 
     #[test]
@@ -282,7 +291,7 @@ mod tests {
 
         assert_eq!(reader.peek().unwrap(), &Token(12, Span(0, 2)));
         assert_eq!(reader.next().unwrap(), Token(12, Span(0, 2)));
-        assert_eq!(reader.next(), None);
+        assert!(reader.next().is_none());
     }
 
     #[test]
@@ -297,7 +306,7 @@ mod tests {
         let err = reader.expect_next(10).unwrap_err();
         assert_eq!(err.position, Some(Span(2, 4)));
         assert_eq!(err.reason, "Expected 10, received 24".to_owned());
-        assert_eq!(reader.next(), None);
+        assert!(reader.next().is_none());
     }
 
     #[test]
@@ -314,7 +323,11 @@ mod tests {
             count += token_val;
             count > 100
         });
-        assert_eq!(x.unwrap().0, 100);
+        assert_eq!(x.unwrap().0, 200);
         assert_eq!(reader.next().unwrap().0, 4);
+        assert_eq!(reader.next().unwrap().0, 10);
+        assert_eq!(reader.next().unwrap().0, 100);
+        assert_eq!(reader.next().unwrap().0, 200);
+        assert!(reader.next().is_none());
     }
 }
