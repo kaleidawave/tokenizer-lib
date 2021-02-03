@@ -20,10 +20,10 @@ assert_eq!(stc.next().unwrap(), Token(52, Span(4, 8)));
 assert_eq!(stc.next(), None);
 ```
 
-Streamed token channel:
+(Multi-thread safe) Streamed token channel:
 
 ```rust
-let (mut sender, mut reader) = get_streamed_token_channel();
+let (mut sender, mut reader) = StreamedTokenChannel::new();
 std::thread::spawn(move || {
     sender.push(Token(12, Span(0, 2)));
     sender.push(Token(32, Span(2, 4)));
