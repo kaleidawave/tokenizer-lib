@@ -145,15 +145,18 @@ pub mod StreamedTokenChannel {
         }
 
         fn scan(&self, mut cb: impl FnMut(&T) -> bool) -> Option<&Token<T, TData>> {
+            let mut found = false;
             for token in unsafe { &*self.cache.get() }.iter() {
-                if cb(&token.0) {
+                if found {
                     return Some(token);
+                }
+                if cb(&token.0) {
+                    found = true;
                 }
             }
             // SAFETY: mutable reference needed to added to cache. RefCell returns Ref<T> not &T.
             // no methods on StreamedTokenReader return &mut to values in the cache
             let cache = unsafe { &mut *self.cache.get() };
-            let mut found = false;
             loop {
                 match self.receiver.recv() {
                     Ok(val) => {
