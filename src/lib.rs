@@ -35,7 +35,7 @@ pub trait TokenReader<T: PartialEq, TData> {
     /// Returns None if reader finishes before closure returns true. Does not advance the reader.
     ///
     /// Used for lookahead and then doing branching based on return value during parsing
-    fn scan(&self, f: impl FnMut(&T) -> bool) -> Option<&Token<T, TData>>;
+    fn scan(&self, f: impl FnMut(&T, &TData) -> bool) -> Option<&Token<T, TData>>;
 
     /// Tests that next token matches an expected type. Will return error if does not
     /// match. The ok value contains the data of the valid token.
@@ -89,10 +89,10 @@ impl<T: PartialEq, TData> TokenReader<T, TData> for StaticTokenChannel<T, TData>
         self.tokens.pop_front()
     }
 
-    fn scan(&self, mut cb: impl FnMut(&T) -> bool) -> Option<&Token<T, TData>> {
+    fn scan(&self, mut cb: impl FnMut(&T, &TData) -> bool) -> Option<&Token<T, TData>> {
         let mut iter = self.tokens.iter().peekable();
         while let Some(token) = iter.next() {
-            if cb(&token.0) {
+            if cb(&token.0, &token.1) {
                 return iter.peek().map(|v| *v);
             }
         }
@@ -144,13 +144,13 @@ pub mod StreamedTokenChannel {
             self.receiver.recv().ok()
         }
 
-        fn scan(&self, mut cb: impl FnMut(&T) -> bool) -> Option<&Token<T, TData>> {
+        fn scan(&self, mut cb: impl FnMut(&T, &TData) -> bool) -> Option<&Token<T, TData>> {
             let mut found = false;
             for token in unsafe { &*self.cache.get() }.iter() {
                 if found {
                     return Some(token);
                 }
-                if cb(&token.0) {
+                if cb(&token.0, &token.1) {
                     found = true;
                 }
             }
@@ -164,7 +164,7 @@ pub mod StreamedTokenChannel {
                             cache.push_back(val);
                             return cache.back();
                         }
-                        if cb(&val.0) {
+                        if cb(&val.0, &val.1) {
                             found = true;
                         }
                         cache.push_back(val);
@@ -216,7 +216,7 @@ mod tests {
     impl<T: PartialEq, TData: PartialEq> Eq for Token<T, TData> {}
 
     mod static_token_channel {
-        use super::*;
+        use super::{StaticTokenChannel, TokenReader, TokenSender, Token};
 
         #[test]
         fn next() {
@@ -260,14 +260,14 @@ mod tests {
             }
 
             let mut count = 0;
-            let x = stc.scan(move |token_val| {
+            let x = stc.scan(move |token_val, _| {
                 count += token_val;
                 count > 100
             });
             assert_eq!(x.unwrap().0, 200);
 
             let mut count = 0;
-            let y = stc.scan(move |token_val| {
+            let y = stc.scan(move |token_val, _| {
                 count += token_val;
                 count > 1000
             });
@@ -282,7 +282,7 @@ mod tests {
     }
 
     mod streamed_token_channel {
-        use super::*;
+        use super::{StreamedTokenChannel, TokenReader, TokenSender, Token};
 
         #[test]
         fn next() {
@@ -334,14 +334,14 @@ mod tests {
             });
 
             let mut count = 0;
-            let x = reader.scan(move |token_val| {
+            let x = reader.scan(move |token_val, _| {
                 count += token_val;
                 count > 100
             });
             assert_eq!(x.unwrap().0, 200);
 
             let mut count = 0;
-            let y = reader.scan(move |token_val| {
+            let y = reader.scan(move |token_val, _| {
                 count += token_val;
                 count > 1000
             });
