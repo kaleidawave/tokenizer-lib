@@ -1,44 +1,27 @@
-use std::{
-    cell::UnsafeCell,
-    collections::VecDeque,
-    sync::mpsc::{sync_channel, Receiver, RecvError, SyncSender},
-};
+//! Tokenization utilities for building parsers in Rust
 
-#[macro_export]
-macro_rules! expect_next {
-    ($reader:expr, $pattern:pat) => {{
-        let next = $reader.next();
-        if let Some(token) = next {
-            if matches!(token.0, $pattern) {
-                Ok(token.1)
-            } else {
-                Err(Some((stringify!($pattern), token)))
-            }
-        } else {
-            Err(None)
-        }
-    }};
-}
+use std::{collections::VecDeque, sync::mpsc::{sync_channel, Receiver, RecvError, SyncSender}, usize};
 
-/// Defines a Token of type T and with a Position
+/// A structure with a piece of data and some additional data such as a position
 pub struct Token<T: PartialEq, TData>(pub T, pub TData);
 
-/// Trait for a reader which returns tokens over a current sequence
+/// A *reader* over a sequence of tokens
 pub trait TokenReader<T: PartialEq, TData> {
-    /// Returns reference to next token but does not advance iterator forward
-    fn peek(&self) -> Option<&Token<T, TData>>;
-    /// Returns token and advances forward
+    /// Returns a reference to next token but does not advance current position
+    fn peek(&mut self) -> Option<&Token<T, TData>>;
+
+    /// Returns the next token and advances
     fn next(&mut self) -> Option<Token<T, TData>>;
 
-    /// Runs the closure over the upcoming tokens. Passes the value behind the Token to the closure.
-    /// Will stop and return a reference to the next Token from when the closure returns true.
-    /// Returns None if reader finishes before closure returns true. Does not advance the reader.
+    /// Runs the closure (cb) over upcoming tokens. Passes the value behind the Token to the closure.
+    /// Will stop and return a reference **to the next Token from when the closure returns true**.
+    /// Returns None if scanning finishes before closure returns true. Does not advance the reader.
     ///
-    /// Used for lookahead and then doing branching based on return value during parsing
-    fn scan(&self, f: impl FnMut(&T, &TData) -> bool) -> Option<&Token<T, TData>>;
+    /// Used for lookahead and then branching based on return value during parsing
+    fn scan(&mut self, cb: impl FnMut(&T, &TData) -> bool) -> Option<&Token<T, TData>>;
 
     /// Tests that next token matches an expected type. Will return error if does not
-    /// match. The ok value contains the data of the valid token.
+    /// match. The `Ok` value contains the data of the valid token.
     /// Else it will return the Err with the expected token type and the token that did not match
     fn expect_next(&mut self, expected_type: T) -> Result<TData, Option<(T, Token<T, TData>)>> {
         match self.next() {
@@ -56,41 +39,41 @@ pub trait TokenReader<T: PartialEq, TData> {
 
 /// Trait for a sender that can append a token to a sequence
 pub trait TokenSender<T: PartialEq, TData> {
-    /// Appends new Token
+    /// Appends a new [`Token`]
     fn push(&mut self, token: Token<T, TData>);
 }
 
-/// A synchronous "channel" which can be used as a sender and reader. Will
-/// buffer all tokens into a `VecDeque` before reading
-pub struct StaticTokenChannel<T: PartialEq, TData> {
-    tokens: VecDeque<Token<T, TData>>,
+/// A queue which can be used as a sender and reader. Use this for buffering all the tokens before reading
+pub struct BufferedTokenQueue<T: PartialEq, TData> {
+    buffer: VecDeque<Token<T, TData>>,
 }
 
-impl<T: PartialEq, TData> StaticTokenChannel<T, TData> {
+impl<T: PartialEq, TData> BufferedTokenQueue<T, TData> {
+    /// Constructs a new [`BufferedTokenQueue`]
     pub fn new() -> Self {
-        StaticTokenChannel {
-            tokens: VecDeque::new(),
+        BufferedTokenQueue {
+            buffer: VecDeque::new(),
         }
     }
 }
 
-impl<T: PartialEq, TData> TokenSender<T, TData> for StaticTokenChannel<T, TData> {
+impl<T: PartialEq, TData> TokenSender<T, TData> for BufferedTokenQueue<T, TData> {
     fn push(&mut self, token: Token<T, TData>) {
-        self.tokens.push_back(token)
+        self.buffer.push_back(token)
     }
 }
 
-impl<T: PartialEq, TData> TokenReader<T, TData> for StaticTokenChannel<T, TData> {
-    fn peek(&self) -> Option<&Token<T, TData>> {
-        self.tokens.front()
+impl<T: PartialEq, TData> TokenReader<T, TData> for BufferedTokenQueue<T, TData> {
+    fn peek(&mut self) -> Option<&Token<T, TData>> {
+        self.buffer.front()
     }
 
     fn next(&mut self) -> Option<Token<T, TData>> {
-        self.tokens.pop_front()
+        self.buffer.pop_front()
     }
 
-    fn scan(&self, mut cb: impl FnMut(&T, &TData) -> bool) -> Option<&Token<T, TData>> {
-        let mut iter = self.tokens.iter().peekable();
+    fn scan(&mut self, mut cb: impl FnMut(&T, &TData) -> bool) -> Option<&Token<T, TData>> {
+        let mut iter = self.buffer.iter().peekable();
         while let Some(token) = iter.next() {
             if cb(&token.0, &token.1) {
                 return iter.peek().map(|v| *v);
@@ -100,96 +83,168 @@ impl<T: PartialEq, TData> TokenReader<T, TData> for StaticTokenChannel<T, TData>
     }
 }
 
-#[allow(non_snake_case)]
-pub mod StreamedTokenChannel {
-    const STREAMED_CHANNEL_BUFFER_SIZE: usize = 20;
+const STREAMED_CHANNEL_BUFFER_SIZE: usize = 20;
 
-    use super::*;
+/// A token queue used for doing lexing and parsing on different threads. Will send tokens between threads
+pub struct ParallelTokenQueue;
 
-    pub struct StreamedTokenSender<T: PartialEq, TData>(SyncSender<Token<T, TData>>);
-    pub struct StreamedTokenReader<T: PartialEq, TData> {
-        receiver: Receiver<Token<T, TData>>,
-        cache: UnsafeCell<VecDeque<Token<T, TData>>>,
+impl ParallelTokenQueue {
+    /// Creates two items, a sender and a receiver. Where the reader is on the parsing thread and the 
+    /// sender is on the lexer thread
+    pub fn new<T: PartialEq, TData>(
+    ) -> (ParallelTokenSender<T, TData>, ParallelTokenReader<T, TData>) {
+        let (sender, receiver) = sync_channel::<Token<T, TData>>(STREAMED_CHANNEL_BUFFER_SIZE);
+        (
+            ParallelTokenSender(sender),
+            ParallelTokenReader {
+                receiver,
+                cache: VecDeque::new(),
+            },
+        )
     }
+}
 
-    impl<T: PartialEq, TData> TokenSender<T, TData> for StreamedTokenSender<T, TData> {
-        fn push(&mut self, token: Token<T, TData>) {
-            self.0.send(token).unwrap();
-        }
+// Sender and reader structs generate by `ParallelTokenQueue::new`:
+
+#[doc(hidden)]
+pub struct ParallelTokenSender<T: PartialEq, TData>(SyncSender<Token<T, TData>>);
+
+#[doc(hidden)]
+pub struct ParallelTokenReader<T: PartialEq, TData> {
+    receiver: Receiver<Token<T, TData>>,
+    cache: VecDeque<Token<T, TData>>,
+}
+
+impl<T: PartialEq, TData> TokenSender<T, TData> for ParallelTokenSender<T, TData> {
+    fn push(&mut self, token: Token<T, TData>) {
+        self.0.send(token).unwrap();
     }
+}
 
-    impl<T: PartialEq, TData> TokenReader<T, TData> for StreamedTokenReader<T, TData> {
-        fn peek(&self) -> Option<&Token<T, TData>> {
-            // SAFETY: mutable reference needed to added to cache. RefCell returns Ref<T, TData> not &T.
-            // no methods on StreamedTokenReader return &mut to values in the cache
-            let cache = unsafe { &mut *self.cache.get() };
-            if cache.is_empty() {
-                match self.receiver.recv() {
-                    Ok(val) => cache.push_back(val),
-                    // Err is reader has dropped e.g. no more tokens
-                    Err(RecvError) => {
-                        return None;
-                    }
+impl<T: PartialEq, TData> TokenReader<T, TData> for ParallelTokenReader<T, TData> {
+    fn peek(&mut self) -> Option<&Token<T, TData>> {
+        if self.cache.is_empty() {
+            match self.receiver.recv() {
+                Ok(token) => self.cache.push_back(token),
+                // Err is reader has dropped e.g. no more tokens
+                Err(RecvError) => {
+                    return None;
                 }
             }
-            cache.front()
         }
+        self.cache.front()
+    }
 
-        fn next(&mut self) -> Option<Token<T, TData>> {
-            // SAFETY: safe to get mutable reference for this function as have mutable self
-            let cache = unsafe { &mut *self.cache.get() };
-            if !cache.is_empty() {
-                return cache.pop_front();
+    fn next(&mut self) -> Option<Token<T, TData>> {
+        // SAFETY: safe to get mutable reference for this function as have mutable self
+        // let cache = unsafe { &mut *self.cache.get() };
+        if !self.cache.is_empty() {
+            return self.cache.pop_front();
+        }
+        self.receiver.recv().ok()
+    }
+
+    fn scan(&mut self, cb: impl FnMut(&T, &TData) -> bool) -> Option<&Token<T, TData>> {
+        let reciever = &mut self.receiver;
+        scan(&mut self.cache, cb, || reciever.recv().ok())
+    }
+}
+
+/// A token queue which has a backing generator/lexer which is called when needed by parsing logic 
+pub struct GeneratorTokenQueue<
+    T: PartialEq,
+    TData,
+    TGeneratorState,
+    TGenerator: FnMut(&mut TGeneratorState) -> Option<Token<T, TData>>,
+> {
+    generator: TGenerator,
+    generator_state: TGeneratorState,
+    cache: VecDeque<Token<T, TData>>,
+}
+
+impl<
+        T: PartialEq,
+        TData,
+        TGeneratorState,
+        TGenerator: FnMut(&mut TGeneratorState) -> Option<Token<T, TData>>,
+    > GeneratorTokenQueue<T, TData, TGeneratorState, TGenerator>
+{
+    /// Create a new [`GeneratorTokenQueue`] with a lexer function and initial state
+    pub fn new(generator: TGenerator, generator_state: TGeneratorState) -> Self {
+        GeneratorTokenQueue {
+            generator,
+            generator_state,
+            cache: VecDeque::new(),
+        }
+    }
+}
+
+impl<
+        T: PartialEq + std::fmt::Debug,
+        TData,
+        TGeneratorState: std::fmt::Debug,
+        TGenerator: FnMut(&mut TGeneratorState) -> Option<Token<T, TData>>,
+    > TokenReader<T, TData> for GeneratorTokenQueue<T, TData, TGeneratorState, TGenerator>
+{
+    fn next(&mut self) -> Option<Token<T, TData>> {
+        if !self.cache.is_empty() {
+            return self.cache.pop_front();
+        }
+        (self.generator)(&mut self.generator_state)
+    }
+
+    fn peek(&mut self) -> Option<&Token<T, TData>> {
+        if self.cache.is_empty() {
+            if let Some(token) = (self.generator)(&mut self.generator_state) {
+                self.cache.push_back(token)
             }
-            self.receiver.recv().ok()
         }
+        self.cache.front()
+    }
 
-        fn scan(&self, mut cb: impl FnMut(&T, &TData) -> bool) -> Option<&Token<T, TData>> {
-            let mut found = false;
-            for token in unsafe { &*self.cache.get() }.iter() {
+    fn scan(&mut self, cb: impl FnMut(&T, &TData) -> bool) -> Option<&Token<T, TData>> {
+        let generator = &mut self.generator;
+        let state = &mut self.generator_state;
+        scan(&mut self.cache, cb, || (generator)(state))
+    }
+}
+
+fn scan<T: PartialEq, TData>(
+    cache: &mut VecDeque<Token<T, TData>>,
+    mut cb: impl FnMut(&T, &TData) -> bool,
+    mut generator: impl FnMut() -> Option<Token<T, TData>>,
+) -> Option<&Token<T, TData>> {
+    // Scan cache first
+    let mut found = None;
+    for (i, token) in cache.iter().enumerate() {
+        if cb(&token.0, &token.1) {
+            found = Some(i);
+            break;
+        }
+    }
+    if let Some(i) = found {
+        if i < cache.len() {
+            return cache.get(i);
+        }
+    }
+    let mut found = found.is_some();
+    // Generate and add to cache while not found
+    loop {
+        match (generator)() {
+            Some(token) => {
                 if found {
-                    return Some(token);
+                    cache.push_back(token);
+                    return cache.back();
                 }
                 if cb(&token.0, &token.1) {
                     found = true;
                 }
+                cache.push_back(token);
             }
-            // SAFETY: mutable reference needed to added to cache. RefCell returns Ref<T> not &T.
-            // no methods on StreamedTokenReader return &mut to values in the cache
-            let cache = unsafe { &mut *self.cache.get() };
-            loop {
-                match self.receiver.recv() {
-                    Ok(val) => {
-                        if found {
-                            cache.push_back(val);
-                            return cache.back();
-                        }
-                        if cb(&val.0, &val.1) {
-                            found = true;
-                        }
-                        cache.push_back(val);
-                    }
-                    // Err is reader has dropped e.g. no more tokens
-                    Err(RecvError) => {
-                        return None;
-                    }
-                }
+            None => {
+                return None;
             }
         }
-    }
-
-    /// Will return a `TokenSender` and `TokenReader` for use when lexing and parsing in separate threads
-    /// Unlike `StaticTokenChannel` it does not buffer all the tokens before parsing can begin
-    pub fn new<T: PartialEq, TData>(
-    ) -> (StreamedTokenSender<T, TData>, StreamedTokenReader<T, TData>) {
-        let (sender, receiver) = sync_channel::<Token<T, TData>>(STREAMED_CHANNEL_BUFFER_SIZE);
-        (
-            StreamedTokenSender(sender),
-            StreamedTokenReader {
-                receiver,
-                cache: UnsafeCell::new(VecDeque::new()),
-            },
-        )
     }
 }
 
@@ -216,11 +271,11 @@ mod tests {
     impl<T: PartialEq, TData: PartialEq> Eq for Token<T, TData> {}
 
     mod static_token_channel {
-        use super::{StaticTokenChannel, TokenReader, TokenSender, Token};
+        use super::{BufferedTokenQueue, Token, TokenReader, TokenSender};
 
         #[test]
         fn next() {
-            let mut stc = StaticTokenChannel::new();
+            let mut stc = BufferedTokenQueue::new();
             stc.push(Token(12, ()));
             stc.push(Token(32, ()));
             stc.push(Token(52, ()));
@@ -233,7 +288,7 @@ mod tests {
 
         #[test]
         fn peek() {
-            let mut stc = StaticTokenChannel::new();
+            let mut stc = BufferedTokenQueue::new();
             stc.push(Token(12, ()));
 
             assert_eq!(stc.peek().unwrap(), &Token(12, ()));
@@ -243,7 +298,7 @@ mod tests {
 
         #[test]
         fn expect_next() {
-            let mut stc = StaticTokenChannel::new();
+            let mut stc = BufferedTokenQueue::new();
             stc.push(Token(12, ()));
             stc.push(Token(24, ()));
 
@@ -254,7 +309,7 @@ mod tests {
 
         #[test]
         fn scan() {
-            let mut stc = StaticTokenChannel::new();
+            let mut stc = BufferedTokenQueue::new();
             for val in vec![4, 10, 100, 200] {
                 stc.push(Token(val, ()));
             }
@@ -282,11 +337,11 @@ mod tests {
     }
 
     mod streamed_token_channel {
-        use super::{StreamedTokenChannel, TokenReader, TokenSender, Token};
+        use super::{ParallelTokenQueue, Token, TokenReader, TokenSender};
 
         #[test]
         fn next() {
-            let (mut sender, mut reader) = StreamedTokenChannel::new();
+            let (mut sender, mut reader) = ParallelTokenQueue::new();
             std::thread::spawn(move || {
                 sender.push(Token(12, ()));
                 sender.push(Token(32, ()));
@@ -301,7 +356,7 @@ mod tests {
 
         #[test]
         fn peek() {
-            let (mut sender, mut reader) = StreamedTokenChannel::new();
+            let (mut sender, mut reader) = ParallelTokenQueue::new();
             std::thread::spawn(move || {
                 sender.push(Token(12, ()));
             });
@@ -313,7 +368,7 @@ mod tests {
 
         #[test]
         fn expect_next() {
-            let (mut sender, mut reader) = StreamedTokenChannel::new();
+            let (mut sender, mut reader) = ParallelTokenQueue::new();
             std::thread::spawn(move || {
                 sender.push(Token(12, ()));
                 sender.push(Token(24, ()));
@@ -326,7 +381,7 @@ mod tests {
 
         #[test]
         fn scan() {
-            let (mut sender, mut reader) = StreamedTokenChannel::new();
+            let (mut sender, mut reader) = ParallelTokenQueue::new();
             std::thread::spawn(move || {
                 for val in vec![4, 10, 100, 200] {
                     sender.push(Token(val, ()));
@@ -354,13 +409,54 @@ mod tests {
         }
     }
 
-    #[test]
-    fn expect_next_macro() {
-        let mut stc = StaticTokenChannel::new();
-        stc.push(Token(12, ()));
-        stc.push(Token(32, ()));
+    mod generator_token_channel {
+        use super::{GeneratorTokenQueue, Token, TokenReader};
 
-        assert!(dbg!(expect_next!(stc, 12)).is_ok());
-        assert!(dbg!(expect_next!(stc, 23)).is_err());
+        fn lexer(state: &mut u8) -> Option<Token<u8, ()>> {
+            *state += 1;
+            match state {
+                1 | 2 | 3 => Some(Token(*state * 2, ())),
+                _ => None,
+            }
+        }
+
+        #[test]
+        fn next() {
+            let mut reader = GeneratorTokenQueue::new(lexer, 0);
+
+            assert_eq!(reader.next().unwrap(), Token(2, ()));
+            assert_eq!(reader.next().unwrap(), Token(4, ()));
+            assert_eq!(reader.next().unwrap(), Token(6, ()));
+            assert!(reader.next().is_none());
+        }
+
+        #[test]
+        fn peek() {
+            let mut reader = GeneratorTokenQueue::new(lexer, 0);
+            assert_eq!(reader.peek().unwrap(), &Token(2, ()));
+            assert_eq!(reader.next().unwrap(), Token(2, ()));
+        }
+
+        #[test]
+        fn expect_next() {
+            let mut reader = GeneratorTokenQueue::new(lexer, 0);
+
+            assert!(reader.expect_next(2).is_ok());
+            assert!(reader.expect_next(5).is_err());
+            assert!(reader.expect_next(6).is_ok());
+        }
+
+        #[test]
+        fn scan() {
+            let mut reader = GeneratorTokenQueue::new(lexer, 0);
+
+            let mut count = 0;
+            let x = reader.scan(move |token_val, _| {
+                count += token_val;
+                count > 3
+            });
+            assert_eq!(x.unwrap().0, 6);
+            assert_eq!(reader.next().unwrap(), Token(2, ()));
+        }
     }
 }
