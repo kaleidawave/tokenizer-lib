@@ -281,18 +281,16 @@ mod generator_token_queue {
                     &mut self.generator_state,
                     &mut GeneratorTokenQueueBuffer(&mut self.cache),
                 );
-                match self.cache.back() {
-                    Some(token) => {
-                        if return_next {
-                            found = Some(self.cache.len() - 1);
-                            break;
-                        }
-                        if cb(&token.0, &token.1) {
-                            return_next = true;
-                        }
+                if self.cache.is_empty() {
+                    return None;
+                }
+                for (idx, token) in self.cache.iter().enumerate() {
+                    if return_next {
+                        found = Some(idx);
+                        break;
                     }
-                    None => {
-                        return None;
+                    if cb(&token.0, &token.1) {
+                        return_next = true;
                     }
                 }
             }
