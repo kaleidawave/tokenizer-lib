@@ -2,7 +2,7 @@ dependencies = { }
 
 [package]
 name = "tokenizer-lib"
-version = "1.0.0"
+version = "1.1.0"
 authors = [ "Ben <kaleidawave@gmail.com>" ]
 edition = "2018"
 license = "MIT"
