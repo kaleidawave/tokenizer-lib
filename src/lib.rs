@@ -277,6 +277,7 @@ mod generator_token_queue {
             };
             let mut found = None::<usize>;
             while found.is_none() {
+                let start = self.cache.len();
                 (self.generator)(
                     &mut self.generator_state,
                     &mut GeneratorTokenQueueBuffer(&mut self.cache),
@@ -284,7 +285,7 @@ mod generator_token_queue {
                 if self.cache.is_empty() {
                     return None;
                 }
-                for (idx, token) in self.cache.iter().enumerate() {
+                for (idx, token) in self.cache.iter().enumerate().skip(start) {
                     if return_next {
                         found = Some(idx);
                         break;
