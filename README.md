@@ -7,10 +7,10 @@ Tokenization utilities for building parsers in Rust
 
 ### Examples
 
-Static token channel:
+Buffered token channel:
 
 ```rust
-let mut stc = StaticTokenChannel::new();
+let mut stc = BufferedTokenQueue::new();
 stc.push(Token(12, Span(0, 2)));
 stc.push(Token(32, Span(2, 4)));
 stc.push(Token(52, Span(4, 8)));
@@ -20,10 +20,10 @@ assert_eq!(stc.next().unwrap(), Token(52, Span(4, 8)));
 assert_eq!(stc.next(), None);
 ```
 
-(Multi-thread safe) Streamed token channel:
+(Multi-thread safe) Parallel token queue:
 
 ```rust
-let (mut sender, mut reader) = StreamedTokenChannel::new();
+let (mut sender, mut reader) = ParallelTokenQueue::new();
 std::thread::spawn(move || {
     sender.push(Token(12, Span(0, 2)));
     sender.push(Token(32, Span(2, 4)));
@@ -36,4 +36,25 @@ assert_eq!(reader.next().unwrap(), Token(52, Span(4, 8)));
 assert_eq!(reader.next(), None);
 ```
 
-Provides utilities such as `peek` and `scan` for lookahead. Also `expect_next` for expecting a token value.
+Generator token queue:
+
+```rust
+fn lexer(state: &mut u8, sender: &mut GeneratorTokenQueueBuffer<u8, ()>) {
+    *state += 1;
+    match state {
+        1 | 2 | 3 => {
+            sender.push(Token(*state * 2, ()))
+        }
+        _ => {}
+    }
+}
+
+let mut reader = GeneratorTokenQueue::new(lexer, 0);
+
+assert_eq!(reader.next().unwrap(), Token(2, ()));
+assert_eq!(reader.next().unwrap(), Token(4, ()));
+assert_eq!(reader.next().unwrap(), Token(6, ()));
+assert!(reader.next().is_none());
+```
+
+Provides utilities such as [`peek`](https://docs.rs/tokenizer-lib/latest/tokenizer_lib/trait.TokenReader.html#tymethod.peek) and [`scan`](https://docs.rs/tokenizer-lib/latest/tokenizer_lib/trait.TokenReader.html#tymethod.scan) for lookahead. Also [`expect_next`](https://docs.rs/tokenizer-lib/latest/tokenizer_lib/trait.TokenReader.html#method.expect_next) for expecting a token value.
