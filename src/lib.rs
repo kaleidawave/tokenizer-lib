@@ -45,7 +45,8 @@ pub trait TokenReader<T: PartialEq, TData> {
 /// Trait for a sender that can append a token to a sequence
 pub trait TokenSender<T: PartialEq, TData> {
     /// Appends a new [`Token`]
-    fn push(&mut self, token: Token<T, TData>);
+    /// Will return false if could not push token
+    fn push(&mut self, token: Token<T, TData>) -> bool;
 }
 
 mod buffered_token_queue {
@@ -65,8 +66,9 @@ mod buffered_token_queue {
     }
 
     impl<T: PartialEq, TData> TokenSender<T, TData> for BufferedTokenQueue<T, TData> {
-        fn push(&mut self, token: Token<T, TData>) {
-            self.buffer.push_back(token)
+        fn push(&mut self, token: Token<T, TData>) -> bool {
+            self.buffer.push_back(token);
+            true
         }
     }
 
@@ -96,7 +98,7 @@ mod parallel_token_queue {
     use super::*;
     use std::sync::mpsc::{sync_channel, Receiver, RecvError, SyncSender};
 
-    const STREAMED_CHANNEL_BUFFER_SIZE: usize = 20;
+    const DEFAULT_BUFFER_SIZE: usize = 20;
 
     /// A token queue used for doing lexing and parsing on different threads. Will send tokens between threads
     pub struct ParallelTokenQueue;
@@ -106,7 +108,13 @@ mod parallel_token_queue {
         /// sender is on the lexer thread
         pub fn new<T: PartialEq, TData>(
         ) -> (ParallelTokenSender<T, TData>, ParallelTokenReader<T, TData>) {
-            let (sender, receiver) = sync_channel::<Token<T, TData>>(STREAMED_CHANNEL_BUFFER_SIZE);
+            Self::new_with_buffer_size(DEFAULT_BUFFER_SIZE)
+        }
+
+        pub fn new_with_buffer_size<T: PartialEq, TData>(
+            buffer_size: usize,
+        ) -> (ParallelTokenSender<T, TData>, ParallelTokenReader<T, TData>) {
+            let (sender, receiver) = sync_channel::<Token<T, TData>>(buffer_size);
             (
                 ParallelTokenSender(sender),
                 ParallelTokenReader {
@@ -129,8 +137,8 @@ mod parallel_token_queue {
     }
 
     impl<T: PartialEq, TData> TokenSender<T, TData> for ParallelTokenSender<T, TData> {
-        fn push(&mut self, token: Token<T, TData>) {
-            self.0.send(token).unwrap();
+        fn push(&mut self, token: Token<T, TData>) -> bool {
+            self.0.send(token).is_ok()
         }
     }
 
@@ -216,8 +224,9 @@ mod generator_token_queue {
     }
 
     impl<'a, T: PartialEq, TData> TokenSender<T, TData> for GeneratorTokenQueueBuffer<'a, T, TData> {
-        fn push(&mut self, token: Token<T, TData>) {
+        fn push(&mut self, token: Token<T, TData>) -> bool {
             self.0.push_back(token);
+            true
         }
     }
 
@@ -500,7 +509,9 @@ mod tests {
         fn lexer(state: &mut u8, sender: &mut GeneratorTokenQueueBuffer<u8, ()>) {
             *state += 1;
             match state {
-                1 | 2 | 3 => sender.push(Token(*state * 2, ())),
+                1 | 2 | 3 => {
+                    sender.push(Token(*state * 2, ()));
+                }
                 _ => {}
             }
         }
