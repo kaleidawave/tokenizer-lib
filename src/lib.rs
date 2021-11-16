@@ -166,9 +166,9 @@ mod parallel_token_queue {
         fn scan(&mut self, mut cb: impl FnMut(&T, &TData) -> bool) -> Option<&Token<T, TData>> {
             let found = scan_cache(&mut self.cache, &mut cb);
             let mut return_next = match found {
-                ScanCacheResult::FoundInCache(i) => return self.cache.get(i),
-                ScanCacheResult::NotFound => false,
+                ScanCacheResult::RetrievableInCacheAt(idx) => return self.cache.get(idx),
                 ScanCacheResult::Found => true,
+                ScanCacheResult::NotFound => false,
             };
             loop {
                 match self.receiver.recv() {
@@ -280,9 +280,9 @@ mod generator_token_queue {
             let cb = &mut cb;
             let found = scan_cache(&mut self.cache, cb);
             let mut return_next = match found {
-                ScanCacheResult::FoundInCache(i) => return self.cache.get(i),
-                ScanCacheResult::NotFound => false,
+                ScanCacheResult::RetrievableInCacheAt(idx) => return self.cache.get(idx),
                 ScanCacheResult::Found => true,
+                ScanCacheResult::NotFound => false,
             };
             let mut found = None::<usize>;
             while found.is_none() {
@@ -309,32 +309,33 @@ mod generator_token_queue {
     }
 }
 
-enum ScanCacheResult<T> {
+enum ScanCacheResult {
+    RetrievableInCacheAt(usize),
     NotFound,
-    FoundInCache(T),
     // Aka pull out next one
     Found,
 }
 
+/// Returns the idx of the **next item** after cb returns true
+/// This returns the idx instead of the item for lifetime reasons
 fn scan_cache<T: PartialEq, TData>(
     cache: &mut VecDeque<Token<T, TData>>,
     cb: &mut impl FnMut(&T, &TData) -> bool,
-) -> ScanCacheResult<usize> {
-    // Scan cache first
-    let mut found = None;
-    for (i, token) in cache.iter().enumerate() {
+) -> ScanCacheResult {
+    let mut cb_returned_true_at_idx = None::<usize>;
+    // Try to find in idx. Returns the idx when found
+    for (idx, token) in cache.iter().enumerate() {
         if cb(&token.0, &token.1) {
-            found = Some(i);
+            cb_returned_true_at_idx = Some(idx);
             break;
         }
     }
-    if let Some(i) = found {
-        if i < cache.len() {
-            return ScanCacheResult::FoundInCache(i);
+    if let Some(idx) = cb_returned_true_at_idx {
+        if idx + 1 < cache.len() {
+            ScanCacheResult::RetrievableInCacheAt(idx + 1)
+        } else {
+            ScanCacheResult::Found
         }
-    }
-    if found.is_some() {
-        ScanCacheResult::Found
     } else {
         ScanCacheResult::NotFound
     }
