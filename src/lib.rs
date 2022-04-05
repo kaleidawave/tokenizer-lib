@@ -1,17 +1,40 @@
 //! Tokenization utilities for building parsers in Rust
 
-use std::{collections::VecDeque, fmt::Debug, usize};
+use std::{
+    collections::VecDeque,
+    fmt::{self, Debug},
+    usize,
+};
 
 pub use buffered_token_queue::*;
 pub use generator_token_queue::*;
 #[cfg(not(target_arch = "wasm32"))]
 pub use parallel_token_queue::*;
 
+/// [PartialEq] is required for comparing tokens with [TokenReader::expect_next]
+pub trait TokenTrait: PartialEq {
+    /// Use this for *nully* tokens. Will be skipped [TokenReader::expect_next]
+    fn is_skippable(&self) -> bool {
+        false
+    }
+}
+
 /// A structure with a piece of data and some additional data such as a position
-pub struct Token<T: PartialEq, TData>(pub T, pub TData);
+pub struct Token<T: TokenTrait, TData>(pub T, pub TData);
+
+// impl<T: TokenTrait, TData: PartialEq> Eq for Token<T, TData> {}
+
+impl<T: TokenTrait + Debug, TData: Debug> Debug for Token<T, TData> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Token")
+            .field(&self.0)
+            .field(&self.1)
+            .finish()
+    }
+}
 
 /// A *reader* over a sequence of tokens
-pub trait TokenReader<T: PartialEq, TData> {
+pub trait TokenReader<T: TokenTrait, TData> {
     /// Returns a reference to next token but does not advance current position
     fn peek(&mut self) -> Option<&Token<T, TData>>;
 
@@ -28,13 +51,18 @@ pub trait TokenReader<T: PartialEq, TData> {
     /// Tests that next token matches an expected type. Will return error if does not
     /// match. The `Ok` value contains the data of the valid token.
     /// Else it will return the Err with the expected token type and the token that did not match
+    ///
+    /// Is the token is skippable (using [TokenTrait::is_skippable])
     fn expect_next(&mut self, expected_type: T) -> Result<TData, Option<(T, Token<T, TData>)>> {
         match self.next() {
             Some(token) => {
-                if &token.0 != &expected_type {
-                    Err(Some((expected_type, token)))
-                } else {
+                if token.0 == expected_type {
                     Ok(token.1)
+                } else if token.0.is_skippable() {
+                    // This will advance to the next, won't cyclically recurse
+                    self.expect_next(expected_type)
+                } else {
+                    Err(Some((expected_type, token)))
                 }
             }
             None => Err(None),
@@ -43,7 +71,7 @@ pub trait TokenReader<T: PartialEq, TData> {
 }
 
 /// Trait for a sender that can append a token to a sequence
-pub trait TokenSender<T: PartialEq, TData> {
+pub trait TokenSender<T: TokenTrait, TData> {
     /// Appends a new [`Token`]
     /// Will return false if could not push token
     fn push(&mut self, token: Token<T, TData>) -> bool;
@@ -52,27 +80,33 @@ pub trait TokenSender<T: PartialEq, TData> {
 mod buffered_token_queue {
     use super::*;
     /// A queue which can be used as a sender and reader. Use this for buffering all the tokens before reading
-    pub struct BufferedTokenQueue<T: PartialEq, TData> {
+    pub struct BufferedTokenQueue<T: TokenTrait, TData> {
         buffer: VecDeque<Token<T, TData>>,
     }
 
-    impl<T: PartialEq, TData> BufferedTokenQueue<T, TData> {
-        /// Constructs a new [`BufferedTokenQueue`]
-        pub fn new() -> Self {
-            BufferedTokenQueue {
-                buffer: VecDeque::new(),
+    impl<T: TokenTrait, TData> Default for BufferedTokenQueue<T, TData> {
+        fn default() -> Self {
+            Self {
+                buffer: Default::default(),
             }
         }
     }
 
-    impl<T: PartialEq, TData> TokenSender<T, TData> for BufferedTokenQueue<T, TData> {
+    impl<T: TokenTrait, TData> BufferedTokenQueue<T, TData> {
+        /// Constructs a new [`BufferedTokenQueue`]
+        pub fn new() -> Self {
+            Default::default()
+        }
+    }
+
+    impl<T: TokenTrait, TData> TokenSender<T, TData> for BufferedTokenQueue<T, TData> {
         fn push(&mut self, token: Token<T, TData>) -> bool {
             self.buffer.push_back(token);
             true
         }
     }
 
-    impl<T: PartialEq, TData> TokenReader<T, TData> for BufferedTokenQueue<T, TData> {
+    impl<T: TokenTrait, TData> TokenReader<T, TData> for BufferedTokenQueue<T, TData> {
         fn peek(&mut self) -> Option<&Token<T, TData>> {
             self.buffer.front()
         }
@@ -85,7 +119,7 @@ mod buffered_token_queue {
             let mut iter = self.buffer.iter().peekable();
             while let Some(token) = iter.next() {
                 if cb(&token.0, &token.1) {
-                    return iter.peek().map(|v| *v);
+                    return iter.peek().copied();
                 }
             }
             None
@@ -106,12 +140,12 @@ mod parallel_token_queue {
     impl ParallelTokenQueue {
         /// Creates two items, a sender and a receiver. Where the reader is on the parsing thread and the
         /// sender is on the lexer thread
-        pub fn new<T: PartialEq, TData>(
+        pub fn new<T: TokenTrait, TData>(
         ) -> (ParallelTokenSender<T, TData>, ParallelTokenReader<T, TData>) {
             Self::new_with_buffer_size(DEFAULT_BUFFER_SIZE)
         }
 
-        pub fn new_with_buffer_size<T: PartialEq, TData>(
+        pub fn new_with_buffer_size<T: TokenTrait, TData>(
             buffer_size: usize,
         ) -> (ParallelTokenSender<T, TData>, ParallelTokenReader<T, TData>) {
             let (sender, receiver) = sync_channel::<Token<T, TData>>(buffer_size);
@@ -128,21 +162,21 @@ mod parallel_token_queue {
     // Sender and reader structs generate by `ParallelTokenQueue::new`:
 
     #[doc(hidden)]
-    pub struct ParallelTokenSender<T: PartialEq, TData>(SyncSender<Token<T, TData>>);
+    pub struct ParallelTokenSender<T: TokenTrait, TData>(SyncSender<Token<T, TData>>);
 
     #[doc(hidden)]
-    pub struct ParallelTokenReader<T: PartialEq, TData> {
+    pub struct ParallelTokenReader<T: TokenTrait, TData> {
         receiver: Receiver<Token<T, TData>>,
         cache: VecDeque<Token<T, TData>>,
     }
 
-    impl<T: PartialEq, TData> TokenSender<T, TData> for ParallelTokenSender<T, TData> {
+    impl<T: TokenTrait, TData> TokenSender<T, TData> for ParallelTokenSender<T, TData> {
         fn push(&mut self, token: Token<T, TData>) -> bool {
             self.0.send(token).is_ok()
         }
     }
 
-    impl<T: PartialEq, TData> TokenReader<T, TData> for ParallelTokenReader<T, TData> {
+    impl<T: TokenTrait, TData> TokenReader<T, TData> for ParallelTokenReader<T, TData> {
         fn peek(&mut self) -> Option<&Token<T, TData>> {
             if self.cache.is_empty() {
                 match self.receiver.recv() {
@@ -198,9 +232,9 @@ mod generator_token_queue {
     /// A token queue which has a backing generator/lexer which is called when needed by parsing logic
     pub struct GeneratorTokenQueue<T, TData, TGeneratorState, TGenerator>
     where
-        T: PartialEq,
+        T: TokenTrait,
         for<'a> TGenerator:
-            FnMut(&mut TGeneratorState, &mut GeneratorTokenQueueBuffer<'a, T, TData>) -> (),
+            FnMut(&mut TGeneratorState, &mut GeneratorTokenQueueBuffer<'a, T, TData>),
     {
         generator: TGenerator,
         generator_state: TGeneratorState,
@@ -209,11 +243,11 @@ mod generator_token_queue {
 
     /// A wrapping struct for the cache around [`GeneratorTokenQueue`]. Use as the second parameter
     /// in the generator/lexer function
-    pub struct GeneratorTokenQueueBuffer<'a, T: PartialEq, TData>(
+    pub struct GeneratorTokenQueueBuffer<'a, T: TokenTrait, TData>(
         &'a mut VecDeque<Token<T, TData>>,
     );
 
-    impl<'a, T: PartialEq, TData> GeneratorTokenQueueBuffer<'a, T, TData> {
+    impl<'a, T: TokenTrait, TData> GeneratorTokenQueueBuffer<'a, T, TData> {
         pub fn is_empty(&self) -> bool {
             self.0.is_empty()
         }
@@ -223,7 +257,7 @@ mod generator_token_queue {
         }
     }
 
-    impl<'a, T: PartialEq, TData> TokenSender<T, TData> for GeneratorTokenQueueBuffer<'a, T, TData> {
+    impl<'a, T: TokenTrait, TData> TokenSender<T, TData> for GeneratorTokenQueueBuffer<'a, T, TData> {
         fn push(&mut self, token: Token<T, TData>) -> bool {
             self.0.push_back(token);
             true
@@ -233,9 +267,9 @@ mod generator_token_queue {
     impl<T, TData, TGeneratorState, TGenerator>
         GeneratorTokenQueue<T, TData, TGeneratorState, TGenerator>
     where
-        T: PartialEq,
+        T: TokenTrait,
         for<'a> TGenerator:
-            FnMut(&mut TGeneratorState, &mut GeneratorTokenQueueBuffer<'a, T, TData>) -> (),
+            FnMut(&mut TGeneratorState, &mut GeneratorTokenQueueBuffer<'a, T, TData>),
     {
         /// Create a new [`GeneratorTokenQueue`] with a lexer function and initial state
         pub fn new(generator: TGenerator, generator_state: TGeneratorState) -> Self {
@@ -250,10 +284,10 @@ mod generator_token_queue {
     impl<T, TData, TGeneratorState, TGenerator> TokenReader<T, TData>
         for GeneratorTokenQueue<T, TData, TGeneratorState, TGenerator>
     where
-        T: PartialEq + Debug,
+        T: TokenTrait,
         TData: Debug,
         for<'a> TGenerator:
-            FnMut(&mut TGeneratorState, &mut GeneratorTokenQueueBuffer<'a, T, TData>) -> (),
+            FnMut(&mut TGeneratorState, &mut GeneratorTokenQueueBuffer<'a, T, TData>),
     {
         fn next(&mut self) -> Option<Token<T, TData>> {
             if !self.cache.is_empty() {
@@ -318,7 +352,7 @@ enum ScanCacheResult {
 
 /// Returns the idx of the **next item** after cb returns true
 /// This returns the idx instead of the item for lifetime reasons
-fn scan_cache<T: PartialEq, TData>(
+fn scan_cache<T: TokenTrait, TData>(
     cache: &mut VecDeque<Token<T, TData>>,
     cb: &mut impl FnMut(&T, &TData) -> bool,
 ) -> ScanCacheResult {
@@ -344,24 +378,16 @@ fn scan_cache<T: PartialEq, TData>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fmt;
 
-    impl<T: PartialEq + fmt::Debug, TData: PartialEq + fmt::Debug> fmt::Debug for Token<T, TData> {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.debug_tuple("Token")
-                .field(&self.0)
-                .field(&self.0)
-                .finish()
-        }
-    }
-
-    impl<T: PartialEq, TData: PartialEq> PartialEq for Token<T, TData> {
+    impl<T: TokenTrait, TData: PartialEq> PartialEq for Token<T, TData> {
         fn eq(&self, other: &Self) -> bool {
             self.0 == other.0 && self.1 == other.1
         }
     }
 
-    impl<T: PartialEq, TData: PartialEq> Eq for Token<T, TData> {}
+    impl<T: TokenTrait, TData: PartialEq> Eq for Token<T, TData> {}
+
+    impl TokenTrait for u32 {}
 
     mod buffered_token_queue {
         use super::{BufferedTokenQueue, Token, TokenReader, TokenSender};
@@ -507,7 +533,7 @@ mod tests {
             GeneratorTokenQueue, GeneratorTokenQueueBuffer, Token, TokenReader, TokenSender,
         };
 
-        fn lexer(state: &mut u8, sender: &mut GeneratorTokenQueueBuffer<u8, ()>) {
+        fn lexer(state: &mut u32, sender: &mut GeneratorTokenQueueBuffer<u32, ()>) {
             *state += 1;
             match state {
                 1 | 2 | 3 => {
@@ -554,6 +580,50 @@ mod tests {
             });
             assert_eq!(x.unwrap().0, 6);
             assert_eq!(reader.next().unwrap(), Token(2, ()));
+        }
+    }
+
+    mod skippable_token {
+        use super::{BufferedTokenQueue, Token, TokenReader, TokenSender, TokenTrait};
+
+        #[derive(PartialEq, Eq, Debug)]
+        enum TokenType {
+            A,
+            B,
+            Ignore,
+        }
+
+        impl TokenTrait for TokenType {
+            fn is_skippable(&self) -> bool {
+                matches!(self, TokenType::Ignore)
+            }
+        }
+
+        #[test]
+        fn still_show_with_next() {
+            let mut stc = BufferedTokenQueue::new();
+            generate_tokens(&mut stc);
+
+            assert_eq!(stc.next().unwrap(), Token(TokenType::A, ()));
+            assert_eq!(stc.next().unwrap(), Token(TokenType::Ignore, ()));
+            assert_eq!(stc.next().unwrap(), Token(TokenType::B, ()));
+            assert!(stc.next().is_none());
+        }
+
+        #[test]
+        fn skipped_under_expect_next() {
+            let mut stc = BufferedTokenQueue::new();
+            generate_tokens(&mut stc);
+
+            assert!(stc.expect_next(TokenType::A).is_ok());
+            assert!(stc.expect_next(TokenType::B).is_ok());
+            assert!(stc.next().is_none());
+        }
+
+        fn generate_tokens(stc: &mut BufferedTokenQueue<TokenType, ()>) {
+            stc.push(Token(TokenType::A, ()));
+            stc.push(Token(TokenType::Ignore, ()));
+            stc.push(Token(TokenType::B, ()));
         }
     }
 }
