@@ -10,14 +10,14 @@ Tokenization utilities for building parsers in Rust
 Buffered token channel:
 
 ```rust
-let mut stc = BufferedTokenQueue::new();
-stc.push(Token(12, Span(0, 2)));
-stc.push(Token(32, Span(2, 4)));
-stc.push(Token(52, Span(4, 8)));
-assert_eq!(stc.next().unwrap(), Token(12, Span(0, 2)));
-assert_eq!(stc.next().unwrap(), Token(32, Span(2, 4)));
-assert_eq!(stc.next().unwrap(), Token(52, Span(4, 8)));
-assert_eq!(stc.next(), None);
+let mut btq = BufferedTokenQueue::new();
+btq.push(Token(12, Span(0, 2)));
+btq.push(Token(32, Span(2, 4)));
+btq.push(Token(52, Span(4, 8)));
+assert_eq!(btq.next().unwrap(), Token(12, Span(0, 2)));
+assert_eq!(btq.next().unwrap(), Token(32, Span(2, 4)));
+assert_eq!(btq.next().unwrap(), Token(52, Span(4, 8)));
+assert_eq!(btq.next(), None);
 ```
 
 (Multi-thread safe) Parallel token queue:
@@ -57,4 +57,4 @@ assert_eq!(reader.next().unwrap(), Token(6, ()));
 assert!(reader.next().is_none());
 ```
 
-Provides utilities such as [`peek`](https://docs.rs/tokenizer-lib/latest/tokenizer_lib/trait.TokenReader.html#tymethod.peek) and [`scan`](https://docs.rs/tokenizer-lib/latest/tokenizer_lib/trait.TokenReader.html#tymethod.scan) for lookahead. Also [`expect_next`](https://docs.rs/tokenizer-lib/latest/tokenizer_lib/trait.TokenReader.html#method.expect_next) for expecting a token value.
+Provides utilities such as [`peek`](https://docs.rs/tokenizer-lib/latest/tokenizer_lib/trait.TokenReader.html#tymethod.peek), [`peek_n`](https://docs.rs/tokenizer-lib/latest/tokenizer_lib/trait.TokenReader.html#tymethod.peek_n) and [`scan`](https://docs.rs/tokenizer-lib/latest/tokenizer_lib/trait.TokenReader.html#tymethod.scan) for lookahead. Also [`expect_next`](https://docs.rs/tokenizer-lib/latest/tokenizer_lib/trait.TokenReader.html#method.expect_next) for expecting a token value and [`conditional_next`](https://docs.rs/tokenizer-lib/latest/tokenizer_lib/trait.TokenReader.html#method.conditional_next) for advancing on a predicate.

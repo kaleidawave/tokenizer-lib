@@ -1,4 +1,5 @@
 //! Tokenization utilities for building parsers in Rust
+#![allow(clippy::type_complexity, clippy::new_ret_no_self)]
 
 use std::{
     collections::VecDeque,
@@ -22,8 +23,6 @@ pub trait TokenTrait: PartialEq {
 /// A structure with a piece of data and some additional data such as a position
 pub struct Token<T: TokenTrait, TData>(pub T, pub TData);
 
-// impl<T: TokenTrait, TData: PartialEq> Eq for Token<T, TData> {}
-
 impl<T: TokenTrait + Debug, TData: Debug> Debug for Token<T, TData> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("Token")
@@ -38,8 +37,21 @@ pub trait TokenReader<T: TokenTrait, TData> {
     /// Returns a reference to next token but does not advance current position
     fn peek(&mut self) -> Option<&Token<T, TData>>;
 
+    /// Returns a reference to nth (zero based) upcoming token without advancing
+    fn peek_n(&mut self, n: usize) -> Option<&Token<T, TData>>;
+
     /// Returns the next token and advances
     fn next(&mut self) -> Option<Token<T, TData>>;
+
+    /// Returns next if `cb` returns true for the upcoming token (the token from [TokenReader::peek])
+    fn conditional_next(&mut self, cb: impl FnOnce(&T) -> bool) -> Option<Token<T, TData>> {
+        let peek = self.peek()?;
+        if cb(&peek.0) {
+            self.next()
+        } else {
+            None
+        }
+    }
 
     /// Runs the closure (cb) over upcoming tokens. Passes the value behind the Token to the closure.
     /// Will stop and return a reference **to the next Token from when the closure returns true**.
@@ -111,6 +123,10 @@ mod buffered_token_queue {
             self.buffer.front()
         }
 
+        fn peek_n(&mut self, n: usize) -> Option<&Token<T, TData>> {
+            self.buffer.get(n)
+        }
+
         fn next(&mut self) -> Option<Token<T, TData>> {
             self.buffer.pop_front()
         }
@@ -149,6 +165,7 @@ mod parallel_token_queue {
             buffer_size: usize,
         ) -> (ParallelTokenSender<T, TData>, ParallelTokenReader<T, TData>) {
             let (sender, receiver) = sync_channel::<Token<T, TData>>(buffer_size);
+
             (
                 ParallelTokenSender(sender),
                 ParallelTokenReader {
@@ -190,6 +207,19 @@ mod parallel_token_queue {
             self.cache.front()
         }
 
+        fn peek_n(&mut self, n: usize) -> Option<&Token<T, TData>> {
+            while self.cache.len() <= n {
+                match self.receiver.recv() {
+                    Ok(token) => self.cache.push_back(token),
+                    // Err is reader has dropped e.g. no more tokens
+                    Err(RecvError) => {
+                        return None;
+                    }
+                }
+            }
+            self.cache.get(n)
+        }
+
         fn next(&mut self) -> Option<Token<T, TData>> {
             if !self.cache.is_empty() {
                 return self.cache.pop_front();
@@ -211,7 +241,7 @@ mod parallel_token_queue {
                             self.cache.push_back(val);
                             return self.cache.back();
                         }
-                        if (&mut cb)(&val.0, &val.1) {
+                        if cb(&val.0, &val.1) {
                             return_next = true;
                         }
                         self.cache.push_back(val);
@@ -289,6 +319,26 @@ mod generator_token_queue {
         for<'a> TGenerator:
             FnMut(&mut TGeneratorState, &mut GeneratorTokenQueueBuffer<'a, T, TData>),
     {
+        fn peek(&mut self) -> Option<&Token<T, TData>> {
+            if self.cache.is_empty() {
+                (self.generator)(
+                    &mut self.generator_state,
+                    &mut GeneratorTokenQueueBuffer(&mut self.cache),
+                );
+            }
+            self.cache.front()
+        }
+
+        fn peek_n(&mut self, n: usize) -> Option<&Token<T, TData>> {
+            while self.cache.len() <= n {
+                (self.generator)(
+                    &mut self.generator_state,
+                    &mut GeneratorTokenQueueBuffer(&mut self.cache),
+                );
+            }
+            self.cache.get(n)
+        }
+
         fn next(&mut self) -> Option<Token<T, TData>> {
             if !self.cache.is_empty() {
                 return self.cache.pop_front();
@@ -298,16 +348,6 @@ mod generator_token_queue {
                 &mut GeneratorTokenQueueBuffer(&mut self.cache),
             );
             self.cache.pop_front()
-        }
-
-        fn peek(&mut self) -> Option<&Token<T, TData>> {
-            if self.cache.is_empty() {
-                (self.generator)(
-                    &mut self.generator_state,
-                    &mut GeneratorTokenQueueBuffer(&mut self.cache),
-                );
-            }
-            self.cache.front()
         }
 
         fn scan(&mut self, mut cb: impl FnMut(&T, &TData) -> bool) -> Option<&Token<T, TData>> {
@@ -394,64 +434,78 @@ mod tests {
 
         #[test]
         fn next() {
-            let mut stc = BufferedTokenQueue::new();
-            stc.push(Token(12, ()));
-            stc.push(Token(32, ()));
-            stc.push(Token(52, ()));
+            let mut btq = BufferedTokenQueue::new();
+            btq.push(Token(12, ()));
+            btq.push(Token(32, ()));
+            btq.push(Token(52, ()));
 
-            assert_eq!(stc.next().unwrap(), Token(12, ()));
-            assert_eq!(stc.next().unwrap(), Token(32, ()));
-            assert_eq!(stc.next().unwrap(), Token(52, ()));
-            assert!(stc.next().is_none());
+            assert_eq!(btq.next().unwrap(), Token(12, ()));
+            assert_eq!(btq.next().unwrap(), Token(32, ()));
+            assert_eq!(btq.next().unwrap(), Token(52, ()));
+            assert!(btq.next().is_none());
         }
 
         #[test]
         fn peek() {
-            let mut stc = BufferedTokenQueue::new();
-            stc.push(Token(12, ()));
+            let mut btq = BufferedTokenQueue::new();
+            btq.push(Token(12, ()));
 
-            assert_eq!(stc.peek().unwrap(), &Token(12, ()));
-            assert_eq!(stc.next().unwrap(), Token(12, ()));
-            assert!(stc.next().is_none());
+            assert_eq!(btq.peek().unwrap(), &Token(12, ()));
+            assert_eq!(btq.next().unwrap(), Token(12, ()));
+            assert!(btq.next().is_none());
+        }
+
+        #[test]
+        fn peek_n() {
+            let mut btq = BufferedTokenQueue::new();
+            btq.push(Token(12, ()));
+            btq.push(Token(32, ()));
+            btq.push(Token(52, ()));
+
+            assert_eq!(btq.peek_n(2).unwrap(), &Token(52, ()));
+            assert_eq!(btq.next().unwrap(), Token(12, ()));
+            assert_eq!(btq.next().unwrap(), Token(32, ()));
+            assert_eq!(btq.next().unwrap(), Token(52, ()));
+            assert!(btq.next().is_none());
         }
 
         #[test]
         fn expect_next() {
-            let mut stc = BufferedTokenQueue::new();
-            stc.push(Token(12, ()));
-            stc.push(Token(24, ()));
+            let mut btq = BufferedTokenQueue::new();
+            btq.push(Token(12, ()));
+            btq.push(Token(24, ()));
 
-            assert_eq!(stc.expect_next(12).unwrap(), ());
-            assert!(stc.expect_next(10).is_err());
-            assert!(stc.next().is_none());
+            assert_eq!(btq.expect_next(12).unwrap(), ());
+            assert!(btq.expect_next(10).is_err());
+            assert!(btq.next().is_none());
         }
 
         #[test]
         fn scan() {
-            let mut stc = BufferedTokenQueue::new();
+            let mut btq = BufferedTokenQueue::new();
             for val in vec![4, 10, 100, 200] {
-                stc.push(Token(val, ()));
+                btq.push(Token(val, ()));
             }
 
             let mut count = 0;
-            let x = stc.scan(move |token_val, _| {
+            let x = btq.scan(move |token_val, _| {
                 count += token_val;
                 count > 100
             });
             assert_eq!(x.unwrap().0, 200);
 
             let mut count = 0;
-            let y = stc.scan(move |token_val, _| {
+            let y = btq.scan(move |token_val, _| {
                 count += token_val;
                 count > 1000
             });
             assert_eq!(y, None);
 
-            assert_eq!(stc.next().unwrap().0, 4);
-            assert_eq!(stc.next().unwrap().0, 10);
-            assert_eq!(stc.next().unwrap().0, 100);
-            assert_eq!(stc.next().unwrap().0, 200);
-            assert!(stc.next().is_none());
+            assert_eq!(btq.next().unwrap().0, 4);
+            assert_eq!(btq.next().unwrap().0, 10);
+            assert_eq!(btq.next().unwrap().0, 100);
+            assert_eq!(btq.next().unwrap().0, 200);
+            assert!(btq.next().is_none());
         }
     }
 
@@ -482,6 +536,22 @@ mod tests {
 
             assert_eq!(reader.peek().unwrap(), &Token(12, ()));
             assert_eq!(reader.next().unwrap(), Token(12, ()));
+            assert!(reader.next().is_none());
+        }
+
+        #[test]
+        fn next_n() {
+            let (mut sender, mut reader) = ParallelTokenQueue::new();
+            std::thread::spawn(move || {
+                sender.push(Token(12, ()));
+                sender.push(Token(32, ()));
+                sender.push(Token(52, ()));
+            });
+
+            assert_eq!(reader.peek_n(2).unwrap(), &Token(52, ()));
+            assert_eq!(reader.next().unwrap(), Token(12, ()));
+            assert_eq!(reader.next().unwrap(), Token(32, ()));
+            assert_eq!(reader.next().unwrap(), Token(52, ()));
             assert!(reader.next().is_none());
         }
 
@@ -561,6 +631,17 @@ mod tests {
         }
 
         #[test]
+        fn peek_n() {
+            let mut reader = GeneratorTokenQueue::new(lexer, 0);
+
+            assert_eq!(reader.peek_n(2).unwrap(), &Token(6, ()));
+            assert_eq!(reader.next().unwrap(), Token(2, ()));
+            assert_eq!(reader.next().unwrap(), Token(4, ()));
+            assert_eq!(reader.next().unwrap(), Token(6, ()));
+            assert!(reader.next().is_none());
+        }
+
+        #[test]
         fn expect_next() {
             let mut reader = GeneratorTokenQueue::new(lexer, 0);
 
@@ -583,6 +664,18 @@ mod tests {
         }
     }
 
+    #[test]
+    fn conditional_next() {
+        let mut btq = BufferedTokenQueue::new();
+        btq.push(Token(12, ()));
+        btq.push(Token(32, ()));
+
+        assert_eq!(btq.conditional_next(|t| *t == 28), None);
+        assert_eq!(btq.conditional_next(|t| *t == 12), Some(Token(12, ())));
+        assert_eq!(btq.next().unwrap(), Token(32, ()));
+        assert!(btq.next().is_none());
+    }
+
     mod skippable_token {
         use super::{BufferedTokenQueue, Token, TokenReader, TokenSender, TokenTrait};
 
@@ -601,29 +694,29 @@ mod tests {
 
         #[test]
         fn still_show_with_next() {
-            let mut stc = BufferedTokenQueue::new();
-            generate_tokens(&mut stc);
+            let mut btq = BufferedTokenQueue::new();
+            generate_tokens(&mut btq);
 
-            assert_eq!(stc.next().unwrap(), Token(TokenType::A, ()));
-            assert_eq!(stc.next().unwrap(), Token(TokenType::Ignore, ()));
-            assert_eq!(stc.next().unwrap(), Token(TokenType::B, ()));
-            assert!(stc.next().is_none());
+            assert_eq!(btq.next().unwrap(), Token(TokenType::A, ()));
+            assert_eq!(btq.next().unwrap(), Token(TokenType::Ignore, ()));
+            assert_eq!(btq.next().unwrap(), Token(TokenType::B, ()));
+            assert!(btq.next().is_none());
         }
 
         #[test]
         fn skipped_under_expect_next() {
-            let mut stc = BufferedTokenQueue::new();
-            generate_tokens(&mut stc);
+            let mut btq = BufferedTokenQueue::new();
+            generate_tokens(&mut btq);
 
-            assert!(stc.expect_next(TokenType::A).is_ok());
-            assert!(stc.expect_next(TokenType::B).is_ok());
-            assert!(stc.next().is_none());
+            assert!(btq.expect_next(TokenType::A).is_ok());
+            assert!(btq.expect_next(TokenType::B).is_ok());
+            assert!(btq.next().is_none());
         }
 
-        fn generate_tokens(stc: &mut BufferedTokenQueue<TokenType, ()>) {
-            stc.push(Token(TokenType::A, ()));
-            stc.push(Token(TokenType::Ignore, ()));
-            stc.push(Token(TokenType::B, ()));
+        fn generate_tokens(btq: &mut BufferedTokenQueue<TokenType, ()>) {
+            btq.push(Token(TokenType::A, ()));
+            btq.push(Token(TokenType::Ignore, ()));
+            btq.push(Token(TokenType::B, ()));
         }
     }
 }
