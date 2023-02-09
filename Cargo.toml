@@ -8,3 +8,11 @@ license = "MIT"
 keywords = ["parsing", "tokenization", "utils"]
 categories = ["parsing"]
 repository = "https://github.com/kaleidawave/tokenizer-lib"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[features]
+default = ["parallel", "buffered", "generator"]
+parallel = []
+buffered = []
+generator = []

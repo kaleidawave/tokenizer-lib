@@ -1,4 +1,4 @@
-//! Tokenization utilities for building parsers in Rust
+#![doc = include_str!("../README.md")]
 #![allow(clippy::type_complexity, clippy::new_ret_no_self)]
 
 use std::{
@@ -7,9 +7,11 @@ use std::{
     usize,
 };
 
+#[cfg(feature = "buffered")]
 pub use buffered_token_queue::*;
+#[cfg(feature = "generator")]
 pub use generator_token_queue::*;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "parallel"))]
 pub use parallel_token_queue::*;
 
 /// [PartialEq] is required for comparing tokens with [TokenReader::expect_next]
@@ -21,6 +23,7 @@ pub trait TokenTrait: PartialEq {
 }
 
 /// A structure with a piece of data and some additional data such as a position
+#[cfg_attr(any(test, doctest), derive(PartialEq, Eq))]
 pub struct Token<T: TokenTrait, TData>(pub T, pub TData);
 
 impl<T: TokenTrait + Debug, TData: Debug> Debug for Token<T, TData> {
@@ -39,6 +42,9 @@ pub trait TokenReader<T: TokenTrait, TData> {
 
     /// Returns a reference to nth (zero based) upcoming token without advancing
     fn peek_n(&mut self, n: usize) -> Option<&Token<T, TData>>;
+
+    /// Use with caution
+    fn peek_mut(&mut self) -> Option<&mut Token<T, TData>>;
 
     /// Returns the next token and advances
     fn next(&mut self) -> Option<Token<T, TData>>;
@@ -89,6 +95,7 @@ pub trait TokenSender<T: TokenTrait, TData> {
     fn push(&mut self, token: Token<T, TData>) -> bool;
 }
 
+#[cfg(feature = "buffered")]
 mod buffered_token_queue {
     use super::*;
     /// A queue which can be used as a sender and reader. Use this for buffering all the tokens before reading
@@ -127,6 +134,10 @@ mod buffered_token_queue {
             self.buffer.get(n)
         }
 
+        fn peek_mut(&mut self) -> Option<&mut Token<T, TData>> {
+            self.buffer.front_mut()
+        }
+
         fn next(&mut self) -> Option<Token<T, TData>> {
             self.buffer.pop_front()
         }
@@ -143,7 +154,7 @@ mod buffered_token_queue {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "parallel"))]
 mod parallel_token_queue {
     use super::*;
     use std::sync::mpsc::{sync_channel, Receiver, RecvError, SyncSender};
@@ -253,9 +264,23 @@ mod parallel_token_queue {
                 }
             }
         }
+
+        fn peek_mut(&mut self) -> Option<&mut Token<T, TData>> {
+            if self.cache.is_empty() {
+                match self.receiver.recv() {
+                    Ok(token) => self.cache.push_back(token),
+                    // Err is reader has dropped e.g. no more tokens
+                    Err(RecvError) => {
+                        return None;
+                    }
+                }
+            }
+            self.cache.front_mut()
+        }
     }
 }
 
+#[cfg(feature = "generator")]
 mod generator_token_queue {
     use super::*;
 
@@ -380,6 +405,16 @@ mod generator_token_queue {
             }
             self.cache.get(found.unwrap())
         }
+
+        fn peek_mut(&mut self) -> Option<&mut Token<T, TData>> {
+            if self.cache.is_empty() {
+                (self.generator)(
+                    &mut self.generator_state,
+                    &mut GeneratorTokenQueueBuffer(&mut self.cache),
+                );
+            }
+            self.cache.front_mut()
+        }
     }
 }
 
@@ -418,14 +453,6 @@ fn scan_cache<T: TokenTrait, TData>(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    impl<T: TokenTrait, TData: PartialEq> PartialEq for Token<T, TData> {
-        fn eq(&self, other: &Self) -> bool {
-            self.0 == other.0 && self.1 == other.1
-        }
-    }
-
-    impl<T: TokenTrait, TData: PartialEq> Eq for Token<T, TData> {}
 
     impl TokenTrait for u32 {}
 
@@ -606,7 +633,7 @@ mod tests {
         fn lexer(state: &mut u32, sender: &mut GeneratorTokenQueueBuffer<u32, ()>) {
             *state += 1;
             match state {
-                1 | 2 | 3 => {
+                1..=3 => {
                     sender.push(Token(*state * 2, ()));
                 }
                 _ => {}
