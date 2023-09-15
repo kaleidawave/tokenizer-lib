@@ -1,4 +1,4 @@
-#![doc = include_str!("../README.md")]
+#![doc = include_str!("./README.md")]
 #![allow(clippy::type_complexity, clippy::new_ret_no_self)]
 
 use std::{
@@ -16,7 +16,7 @@ pub use parallel_token_queue::*;
 
 /// [PartialEq] is required for comparing tokens with [TokenReader::expect_next]
 pub trait TokenTrait: PartialEq {
-    /// Use this for *nully* tokens. Will be skipped [TokenReader::expect_next]
+    /// Use this for *nully* tokens. Will be skipped under [TokenReader::expect_next]
     fn is_skippable(&self) -> bool {
         false
     }
@@ -447,6 +447,62 @@ fn scan_cache<T: TokenTrait, TData>(
         }
     } else {
         ScanCacheResult::NotFound
+    }
+}
+
+#[cfg(feature = "sized-tokens")]
+pub mod sized_tokens {
+    use crate::{Token, TokenReader, TokenTrait};
+
+    /// Tokens with a known length (in bytes)
+    pub trait SizedToken: TokenTrait {
+        fn length(&self) -> u32;
+    }
+
+    pub type TokenStart = source_map::Start;
+    pub type TokenEnd = source_map::End;
+
+    impl<T: SizedToken> Token<T, TokenStart> {
+        pub fn get_span(&self) -> source_map::Span {
+            let start = self.1 .0;
+            source_map::Span {
+                start,
+                end: self.1 .0 + self.0.length(),
+                source: (),
+            }
+        }
+
+        pub fn get_end(&self) -> TokenEnd {
+            source_map::End(self.1 .0 + self.0.length())
+        }
+    }
+
+    pub trait TokenReaderWithTokenEnds<T: SizedToken>: TokenReader<T, TokenStart> {
+        fn expect_next_get_end(
+            &mut self,
+            expected_type: T,
+        ) -> Result<TokenEnd, Option<(T, Token<T, TokenStart>)>> {
+            match self.next() {
+                Some(token) => {
+                    if token.0 == expected_type {
+                        Ok(token.get_end())
+                    } else if token.0.is_skippable() {
+                        // This will advance to the next, won't cyclically recurse
+                        self.expect_next_get_end(expected_type)
+                    } else {
+                        Err(Some((expected_type, token)))
+                    }
+                }
+                None => Err(None),
+            }
+        }
+    }
+
+    impl<T, TR> TokenReaderWithTokenEnds<T> for TR
+    where
+        T: SizedToken,
+        TR: TokenReader<T, TokenStart>,
+    {
     }
 }
 
