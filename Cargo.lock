@@ -3,5 +3,14 @@
 version = 3
 
 [[package]]
+name = "source-map"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bdb0d42bb4480eab8b06f7ff7a663c4eda28a81818bd4bc92b168944e2adf5e7"
+
+[[package]]
 name = "tokenizer-lib"
-version = "1.4.0"
+version = "1.5.1"
+dependencies = [
+ "source-map",
+]
